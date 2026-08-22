@@ -44,3 +44,33 @@ func (n *Node) Role() Role {
 	defer n.mu.Unlock()
 	return n.role
 }
+
+// mutateLog is the only sanctioned path for mutating n.log. It panics if a
+// leader attempts any operation other than "append" — leaders must never
+// rewrite or truncate their own log (Invariant I-02).
+func (n *Node) mutateLog(op string, fn func()) {
+	if n.role == Leader && op != "append" {
+		panic("illegal leader log mutation: " + op)
+	}
+	fn()
+}
+
+// appendAsLeader is the only exposed leader-log-mutation path.
+func (n *Node) appendAsLeader(e LogEntry) {
+	n.mutateLog("append", func() {
+		n.log = append(n.log, e)
+	})
+}
+
+// truncateFrom is used only during follower conflict resolution; the guard
+// ensures it can never run while n.role==Leader.
+func (n *Node) truncateFrom(index int64) {
+	n.mutateLog("truncate", func() {
+		for i, e := range n.log {
+			if e.Index == index {
+				n.log = n.log[:i]
+				return
+			}
+		}
+	})
+}
