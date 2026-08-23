@@ -40,6 +40,69 @@ func TestTerm_RejectsLower(t *testing.T) {
 	}
 }
 
+func TestVote_FirstGranted(t *testing.T) {
+	n := NewNode("node-0", nil, nil)
+
+	reply := n.HandleRequestVote(RequestVoteArgs{Term: 1, CandidateID: "node-1"})
+
+	if !reply.VoteGranted {
+		t.Fatal("expected first vote in a fresh term to be granted")
+	}
+	if n.votedFor != "node-1" {
+		t.Fatalf("expected votedFor=node-1, got %q", n.votedFor)
+	}
+}
+
+func TestVote_GrantedOnce(t *testing.T) {
+	n := NewNode("node-0", nil, nil)
+
+	first := n.HandleRequestVote(RequestVoteArgs{Term: 1, CandidateID: "node-1"})
+	if !first.VoteGranted {
+		t.Fatal("expected first vote to be granted")
+	}
+
+	second := n.HandleRequestVote(RequestVoteArgs{Term: 1, CandidateID: "node-2"})
+	if second.VoteGranted {
+		t.Fatal("expected second vote request in the same term, different candidate, to be rejected")
+	}
+
+	// Re-voting for the SAME candidate within the same term stays idempotent.
+	repeat := n.HandleRequestVote(RequestVoteArgs{Term: 1, CandidateID: "node-1"})
+	if !repeat.VoteGranted {
+		t.Fatal("expected a retried request from the already-voted-for candidate to remain granted")
+	}
+}
+
+func TestVote_RejectsStaleTerm(t *testing.T) {
+	n := NewNode("node-0", nil, nil)
+	n.updateTerm(5)
+
+	reply := n.HandleRequestVote(RequestVoteArgs{Term: 3, CandidateID: "node-1"})
+
+	if reply.VoteGranted {
+		t.Fatal("expected a stale-term request to be rejected")
+	}
+	if reply.Term != 5 {
+		t.Fatalf("expected reply term 5, got %d", reply.Term)
+	}
+}
+
+func TestVote_RejectsStaleLog(t *testing.T) {
+	n := NewNode("node-0", nil, nil)
+	n.log = []LogEntry{{Index: 1, Term: 5}, {Index: 2, Term: 5}}
+
+	reply := n.HandleRequestVote(RequestVoteArgs{
+		Term:         6,
+		CandidateID:  "node-1",
+		LastLogIndex: 1,
+		LastLogTerm:  3,
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected a candidate with a stale log to be rejected even in a fresh term")
+	}
+}
+
 func TestTerm_RestartResets(t *testing.T) {
 	n := NewNode("node-0", nil, nil)
 	n.updateTerm(9)
