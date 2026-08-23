@@ -1,6 +1,44 @@
 package raft
 
-import "testing"
+import (
+	"context"
+	"math/rand"
+	"sync"
+	"testing"
+	"time"
+)
+
+// fakeTransport is a minimal raft.Transport test double: it records every
+// Send call and returns a fixed reply/error, with no real delivery.
+type fakeTransport struct {
+	mu   sync.Mutex
+	id   string
+	sent []fakeSentCall
+
+	reply any
+	err   error
+}
+
+type fakeSentCall struct {
+	target  string
+	rpcType string
+	args    any
+}
+
+func (f *fakeTransport) LocalID() string { return f.id }
+
+func (f *fakeTransport) Send(ctx context.Context, target, rpcType string, args any) (any, error) {
+	f.mu.Lock()
+	f.sent = append(f.sent, fakeSentCall{target: target, rpcType: rpcType, args: args})
+	f.mu.Unlock()
+	return f.reply, f.err
+}
+
+func (f *fakeTransport) sentCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sent)
+}
 
 func TestTerm_Monotonic(t *testing.T) {
 	n := NewNode("node-0", nil, nil)
@@ -118,5 +156,70 @@ func TestTerm_RestartResets(t *testing.T) {
 	}
 	if n.termHistory != nil {
 		t.Fatalf("expected termHistory cleared after restart, got %v", n.termHistory)
+	}
+}
+
+func TestTimer_RandomizedRange(t *testing.T) {
+	n := NewNode("node-0", []string{"node-1"}, &fakeTransport{id: "node-0"},
+		WithElectionTimeout(150*time.Millisecond, 300*time.Millisecond),
+		WithRandSource(rand.NewSource(42)),
+	)
+
+	seen := map[time.Duration]bool{}
+	for i := 0; i < 100; i++ {
+		n.mu.Lock()
+		d := n.randomElectionTimeoutLocked()
+		n.mu.Unlock()
+
+		if d < 150*time.Millisecond || d >= 300*time.Millisecond {
+			t.Fatalf("sample %d: timeout %v out of range [150ms,300ms)", i, d)
+		}
+		seen[d] = true
+	}
+
+	if len(seen) < 2 {
+		t.Fatal("expected variance across 100 samples, got a constant value")
+	}
+}
+
+func TestCandidate_IncrementsTermAndVotesSelf(t *testing.T) {
+	n := NewNode("node-0", nil, &fakeTransport{id: "node-0"},
+		WithElectionTimeout(10*time.Millisecond, 20*time.Millisecond),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.runElectionTimer(ctx)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if n.Role() == Candidate {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for Follower to become Candidate")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.currentTerm != 1 {
+		t.Fatalf("expected currentTerm 1 after first election timeout, got %d", n.currentTerm)
+	}
+	if n.votedFor != "node-0" {
+		t.Fatalf("expected votedFor=node-0 (self), got %q", n.votedFor)
+	}
+}
+
+func TestElection_SendsToAllPeers(t *testing.T) {
+	ft := &fakeTransport{id: "node-0", reply: RequestVoteReply{VoteGranted: false}}
+	n := NewNode("node-0", []string{"node-1", "node-2", "node-3", "node-4"}, ft)
+
+	n.startElection(context.Background())
+
+	if got := ft.sentCount(); got != 4 {
+		t.Fatalf("expected RequestVote sent to all 4 peers, got %d calls", got)
 	}
 }

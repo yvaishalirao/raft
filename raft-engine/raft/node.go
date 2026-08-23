@@ -2,8 +2,15 @@ package raft
 
 import (
 	"context"
+	"math/rand"
 	"sync"
 	"time"
+)
+
+const (
+	DefaultElectionTimeoutMin = 150 * time.Millisecond
+	DefaultElectionTimeoutMax = 300 * time.Millisecond
+	DefaultHeartbeatInterval  = 50 * time.Millisecond
 )
 
 type Node struct {
@@ -21,20 +28,69 @@ type Node struct {
 	peers     []string
 	transport Transport
 
-	electionTimeout time.Duration
-	onRoleChange    func(Role, int64)
+	electionTimeoutMin time.Duration
+	electionTimeoutMax time.Duration
+	electionTimer      *time.Timer
+	heartbeatInterval  time.Duration
+	rng                *rand.Rand
+
+	onRoleChange func(Role, int64)
 }
 
-func NewNode(id string, peers []string, transport Transport) *Node {
-	return &Node{
-		id:        id,
-		peers:     peers,
-		transport: transport,
-		role:      Follower,
+// NodeOption configures optional Node behavior at construction time.
+type NodeOption func(*Node)
+
+// WithElectionTimeout overrides the default randomized election timeout range.
+func WithElectionTimeout(min, max time.Duration) NodeOption {
+	return func(n *Node) {
+		n.electionTimeoutMin = min
+		n.electionTimeoutMax = max
 	}
 }
 
-// Run is a stub background loop; it becomes the election/heartbeat loop in Session 3.
+// WithHeartbeatInterval overrides the default leader heartbeat interval.
+func WithHeartbeatInterval(d time.Duration) NodeOption {
+	return func(n *Node) {
+		n.heartbeatInterval = d
+	}
+}
+
+// WithRandSource overrides the source of randomness backing election-timeout
+// jitter, enabling deterministic tests.
+func WithRandSource(src rand.Source) NodeOption {
+	return func(n *Node) {
+		n.rng = rand.New(src)
+	}
+}
+
+// WithOnRoleChange registers a callback invoked whenever the node's role
+// changes, carrying the new role and the term at which it changed.
+func WithOnRoleChange(fn func(Role, int64)) NodeOption {
+	return func(n *Node) {
+		n.onRoleChange = fn
+	}
+}
+
+func NewNode(id string, peers []string, transport Transport, opts ...NodeOption) *Node {
+	n := &Node{
+		id:                 id,
+		peers:              peers,
+		transport:          transport,
+		role:               Follower,
+		electionTimeoutMin: DefaultElectionTimeoutMin,
+		electionTimeoutMax: DefaultElectionTimeoutMax,
+		heartbeatInterval:  DefaultHeartbeatInterval,
+		rng:                rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
+}
+
+// Run is a stub background loop; it becomes the election/heartbeat/dispatch
+// loop once the in-memory harness wires real peer communication (Session 2
+// task 3.5).
 func (n *Node) Run(ctx context.Context) error {
 	return nil
 }
