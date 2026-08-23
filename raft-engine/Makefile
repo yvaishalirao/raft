@@ -1,4 +1,4 @@
-.PHONY: build test lint proto demo
+.PHONY: build test lint proto demo isolation
 
 build:
 	go build ./...
@@ -17,3 +17,6 @@ proto:
 
 demo:
 	docker compose -f docker/docker-compose.yml up --build
+
+isolation:
+	bash scripts/check_isolation.sh

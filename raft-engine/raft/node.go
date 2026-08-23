@@ -16,6 +16,7 @@ type Node struct {
 	log         []LogEntry
 	commitIndex int64
 	lastApplied int64
+	termHistory []int64
 
 	peers     []string
 	transport Transport
