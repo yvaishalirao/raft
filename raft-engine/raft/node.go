@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"sync"
 	"time"
@@ -11,6 +12,11 @@ const (
 	DefaultElectionTimeoutMin = 150 * time.Millisecond
 	DefaultElectionTimeoutMax = 300 * time.Millisecond
 	DefaultHeartbeatInterval  = 50 * time.Millisecond
+)
+
+var (
+	errUnexpectedRPCArgs = errors.New("raft: unexpected RPC argument type")
+	errUnknownRPCType    = errors.New("raft: unknown RPC type")
 )
 
 type Node struct {
@@ -94,11 +100,38 @@ func NewNode(id string, peers []string, transport Transport, opts ...NodeOption)
 	return n
 }
 
-// Run is a stub background loop; it becomes the election/heartbeat/dispatch
-// loop once the in-memory harness wires real peer communication (Session 2
-// task 3.5).
+// Run starts the election timer and then dispatches every inbound RPC to
+// its handler until ctx is done.
 func (n *Node) Run(ctx context.Context) error {
-	return nil
+	go n.runElectionTimer(ctx)
+
+	for {
+		rpc, ok := n.transport.Recv(ctx)
+		if !ok {
+			return nil
+		}
+
+		switch rpc.Type {
+		case "RequestVote":
+			args, ok := rpc.Args.(RequestVoteArgs)
+			if !ok {
+				rpc.Reply(nil, errUnexpectedRPCArgs)
+				continue
+			}
+			rpc.Reply(n.HandleRequestVote(args), nil)
+
+		case "AppendEntries":
+			args, ok := rpc.Args.(AppendEntriesArgs)
+			if !ok {
+				rpc.Reply(nil, errUnexpectedRPCArgs)
+				continue
+			}
+			rpc.Reply(n.HandleAppendEntries(args), nil)
+
+		default:
+			rpc.Reply(nil, errUnknownRPCType)
+		}
+	}
 }
 
 // Role returns the node's current role. Safe for concurrent use.
@@ -106,6 +139,18 @@ func (n *Node) Role() Role {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.role
+}
+
+// Term returns the node's current term. Safe for concurrent use.
+func (n *Node) Term() int64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.currentTerm
+}
+
+// ID returns the node's own ID.
+func (n *Node) ID() string {
+	return n.id
 }
 
 // mutateLog is the only sanctioned path for mutating n.log. It panics if a

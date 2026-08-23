@@ -123,3 +123,22 @@ func (t *InMemoryTransport) Send(ctx context.Context, target string, rpcType str
 		return nil, ctx.Err()
 	}
 }
+
+// Recv implements raft.Transport by reading from this node's own inbox —
+// the same channel Inbox exposes directly for lower-level transport tests.
+func (t *InMemoryTransport) Recv(ctx context.Context) (raft.RPC, bool) {
+	ch := t.router.Inbox(t.nodeID)
+
+	select {
+	case env := <-ch:
+		return raft.RPC{
+			Type: env.RPCType,
+			Args: env.Args,
+			Reply: func(reply any, err error) {
+				env.Reply <- rpcResult{Reply: reply, Err: err}
+			},
+		}, true
+	case <-ctx.Done():
+		return raft.RPC{}, false
+	}
+}

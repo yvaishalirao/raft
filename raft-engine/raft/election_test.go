@@ -48,6 +48,13 @@ func (f *fakeTransport) sentCount() int {
 	return len(f.sent)
 }
 
+// Recv is unused by these tests, which never run a Node's dispatch loop —
+// it exists only to satisfy raft.Transport.
+func (f *fakeTransport) Recv(ctx context.Context) (RPC, bool) {
+	<-ctx.Done()
+	return RPC{}, false
+}
+
 func TestTerm_Monotonic(t *testing.T) {
 	n := NewNode("node-0", nil, nil)
 
