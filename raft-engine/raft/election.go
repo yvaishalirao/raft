@@ -75,31 +75,23 @@ func (n *Node) candidateLogUpToDate(candLastTerm, candLastIndex int64) bool {
 	return candLastIndex >= myLastIndex
 }
 
-// resetElectionTimer locks n.mu and (re)arms the election timer with a fresh
-// random duration.
+// resetElectionTimer asks the runElectionTimer goroutine to restart its
+// timer with a fresh random duration. Safe to call from any goroutine and
+// with or without n.mu held: it never touches a *time.Timer directly, only
+// sends a coalescing, non-blocking signal.
 func (n *Node) resetElectionTimer() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.resetElectionTimerLocked()
+	select {
+	case n.resetElectionSignal <- struct{}{}:
+	default:
+	}
 }
 
-// resetElectionTimerLocked (re)arms n.electionTimer with a new randomized
-// duration in [electionTimeoutMin, electionTimeoutMax). Callers must already
-// hold n.mu.
+// resetElectionTimerLocked is an alias of resetElectionTimer kept for
+// call sites inside functions that already hold n.mu — the signal send
+// itself needs no locking, but naming it this way documents the calling
+// convention at each site.
 func (n *Node) resetElectionTimerLocked() {
-	d := n.randomElectionTimeoutLocked()
-
-	if n.electionTimer == nil {
-		n.electionTimer = time.NewTimer(d)
-		return
-	}
-	if !n.electionTimer.Stop() {
-		select {
-		case <-n.electionTimer.C:
-		default:
-		}
-	}
-	n.electionTimer.Reset(d)
+	n.resetElectionTimer()
 }
 
 // randomElectionTimeoutLocked samples a random duration in
@@ -113,31 +105,50 @@ func (n *Node) randomElectionTimeoutLocked() time.Duration {
 }
 
 // runElectionTimer is the background goroutine that turns election-timeout
-// expiry into a Follower→Candidate transition. It must not hold n.mu while
-// calling startElection, since that performs blocking network I/O.
+// expiry into a Follower→Candidate transition. It is the sole owner of its
+// *time.Timer — no other goroutine ever calls Stop/Reset on it or receives
+// from its channel, which is what makes concurrent resets from RPC handlers
+// safe. It must not hold n.mu while calling startElection, since that
+// performs blocking network I/O.
 func (n *Node) runElectionTimer(ctx context.Context) {
 	n.mu.Lock()
-	if n.electionTimer == nil {
-		n.resetElectionTimerLocked()
-	}
+	d := n.randomElectionTimeoutLocked()
 	n.mu.Unlock()
 
-	for {
-		n.mu.Lock()
-		timer := n.electionTimer
-		n.mu.Unlock()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 
+	drainAndReset := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		n.mu.Lock()
+		d := n.randomElectionTimeoutLocked()
+		n.mu.Unlock()
+		timer.Reset(d)
+	}
+
+	for {
 		select {
 		case <-ctx.Done():
 			return
+
+		case <-n.resetElectionSignal:
+			drainAndReset()
+
 		case <-timer.C:
 			n.mu.Lock()
 			shouldElect := n.role != Leader
 			if shouldElect {
 				n.becomeCandidateLocked()
 			}
-			n.resetElectionTimerLocked()
+			d := n.randomElectionTimeoutLocked()
 			n.mu.Unlock()
+
+			timer.Reset(d)
 
 			if shouldElect {
 				go n.startElection(ctx)
@@ -166,9 +177,11 @@ func (n *Node) voteRequestTimeout() time.Duration {
 	return 200 * time.Millisecond
 }
 
-// startElection sends RequestVote to every peer concurrently and waits for
-// all replies (or their timeouts) before returning. Vote counting and the
-// Candidate→Leader transition are added in task 3.4.
+// startElection sends RequestVote to every peer concurrently, counts
+// vote_granted replies as they arrive, and transitions Candidate→Leader on
+// the first majority (self-vote counts). A reply carrying a higher term
+// steps this node down to Follower via updateTerm. Waits for all replies (or
+// their timeouts) before returning.
 func (n *Node) startElection(ctx context.Context) {
 	n.mu.Lock()
 	term := n.currentTerm
@@ -179,7 +192,23 @@ func (n *Node) startElection(ctx context.Context) {
 		lastIndex, lastTerm = last.Index, last.Term
 	}
 	peers := append([]string(nil), n.peers...)
+	majority := (len(peers)+1)/2 + 1
+
+	votes := 1 // self-vote
+	wonImmediately := votes >= majority && n.becomeLeaderLocked(term)
 	n.mu.Unlock()
+
+	if wonImmediately {
+		n.fireRoleChange(Leader, term)
+		go n.startHeartbeats(ctx)
+		return
+	}
+	if len(peers) == 0 {
+		return
+	}
+
+	votesMu := &sync.Mutex{}
+	decided := false
 
 	var wg sync.WaitGroup
 	for _, peer := range peers {
@@ -189,17 +218,131 @@ func (n *Node) startElection(ctx context.Context) {
 			defer wg.Done()
 
 			rctx, cancel := context.WithTimeout(ctx, n.voteRequestTimeout())
-			defer cancel()
-
-			_, _ = n.transport.Send(rctx, peer, "RequestVote", RequestVoteArgs{
+			reply, err := n.transport.Send(rctx, peer, "RequestVote", RequestVoteArgs{
 				Term:         term,
 				CandidateID:  candidateID,
 				LastLogIndex: lastIndex,
 				LastLogTerm:  lastTerm,
 			})
+			cancel()
+			if err != nil {
+				return
+			}
+			rv, ok := reply.(RequestVoteReply)
+			if !ok {
+				return
+			}
+
+			n.mu.Lock()
+			if rv.Term > n.currentTerm {
+				n.updateTerm(rv.Term)
+				n.mu.Unlock()
+				return
+			}
+			if n.role != Candidate || n.currentTerm != term || !rv.VoteGranted {
+				n.mu.Unlock()
+				return
+			}
+
+			votesMu.Lock()
+			votes++
+			win := !decided && votes >= majority
+			if win {
+				decided = true
+			}
+			votesMu.Unlock()
+
+			becameLeader := false
+			if win {
+				becameLeader = n.becomeLeaderLocked(term)
+			}
+			n.mu.Unlock()
+
+			if becameLeader {
+				n.fireRoleChange(Leader, term)
+				go n.startHeartbeats(ctx)
+			}
 		}()
 	}
 	wg.Wait()
+}
+
+// becomeLeaderLocked transitions Candidate → Leader if this node is still a
+// valid candidate for term (not superseded by a stepdown or a newer
+// election). Callers must already hold n.mu, and must not perform
+// side-effecting work (callbacks, network I/O) while still holding it.
+func (n *Node) becomeLeaderLocked(term int64) bool {
+	if n.role != Candidate || n.currentTerm != term {
+		return false
+	}
+	n.role = Leader
+	return true
+}
+
+// fireRoleChange invokes the onRoleChange callback, if any. Must be called
+// without holding n.mu.
+func (n *Node) fireRoleChange(role Role, term int64) {
+	if n.onRoleChange != nil {
+		n.onRoleChange(role, term)
+	}
+}
+
+// startHeartbeats runs as a goroutine for as long as this node remains
+// leader of term, sending empty AppendEntries (heartbeats) to every peer on
+// a fixed interval to suppress followers' elections.
+func (n *Node) startHeartbeats(ctx context.Context) {
+	n.mu.Lock()
+	term := n.currentTerm
+	interval := n.heartbeatInterval
+	n.mu.Unlock()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.mu.Lock()
+			stillLeader := n.role == Leader && n.currentTerm == term
+			leaderID := n.id
+			commit := n.commitIndex
+			peers := append([]string(nil), n.peers...)
+			n.mu.Unlock()
+
+			if !stillLeader {
+				return
+			}
+
+			for _, peer := range peers {
+				peer := peer
+				go func() {
+					hctx, cancel := context.WithTimeout(ctx, interval)
+					defer cancel()
+
+					reply, err := n.transport.Send(hctx, peer, "AppendEntries", AppendEntriesArgs{
+						Term:         term,
+						LeaderID:     leaderID,
+						LeaderCommit: commit,
+					})
+					if err != nil {
+						return
+					}
+					ar, ok := reply.(AppendEntriesReply)
+					if !ok {
+						return
+					}
+
+					n.mu.Lock()
+					if ar.Term > n.currentTerm {
+						n.updateTerm(ar.Term)
+					}
+					n.mu.Unlock()
+				}()
+			}
+		}
+	}
 }
 
 // restart simulates a fresh process restart: the one legitimate, explicitly

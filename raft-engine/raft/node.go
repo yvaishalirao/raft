@@ -30,9 +30,14 @@ type Node struct {
 
 	electionTimeoutMin time.Duration
 	electionTimeoutMax time.Duration
-	electionTimer      *time.Timer
 	heartbeatInterval  time.Duration
 	rng                *rand.Rand
+
+	// resetElectionSignal lets other goroutines (RPC handlers) ask the
+	// runElectionTimer goroutine to restart its timer, without ever touching
+	// the *time.Timer itself from outside its owning goroutine — sharing a
+	// single Timer's channel across goroutines is a well-known Go race.
+	resetElectionSignal chan struct{}
 
 	onRoleChange func(Role, int64)
 }
@@ -73,14 +78,15 @@ func WithOnRoleChange(fn func(Role, int64)) NodeOption {
 
 func NewNode(id string, peers []string, transport Transport, opts ...NodeOption) *Node {
 	n := &Node{
-		id:                 id,
-		peers:              peers,
-		transport:          transport,
-		role:               Follower,
-		electionTimeoutMin: DefaultElectionTimeoutMin,
-		electionTimeoutMax: DefaultElectionTimeoutMax,
-		heartbeatInterval:  DefaultHeartbeatInterval,
-		rng:                rand.New(rand.NewSource(time.Now().UnixNano())),
+		id:                  id,
+		peers:               peers,
+		transport:           transport,
+		role:                Follower,
+		electionTimeoutMin:  DefaultElectionTimeoutMin,
+		electionTimeoutMax:  DefaultElectionTimeoutMax,
+		heartbeatInterval:   DefaultHeartbeatInterval,
+		rng:                 rand.New(rand.NewSource(time.Now().UnixNano())),
+		resetElectionSignal: make(chan struct{}, 1),
 	}
 	for _, opt := range opts {
 		opt(n)

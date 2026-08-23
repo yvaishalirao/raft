@@ -17,6 +17,10 @@ type fakeTransport struct {
 
 	reply any
 	err   error
+
+	// sendFunc, if set, overrides reply/err and lets a test vary the
+	// response per target (e.g. some peers grant, some don't).
+	sendFunc func(target, rpcType string, args any) (any, error)
 }
 
 type fakeSentCall struct {
@@ -31,6 +35,10 @@ func (f *fakeTransport) Send(ctx context.Context, target, rpcType string, args a
 	f.mu.Lock()
 	f.sent = append(f.sent, fakeSentCall{target: target, rpcType: rpcType, args: args})
 	f.mu.Unlock()
+
+	if f.sendFunc != nil {
+		return f.sendFunc(target, rpcType, args)
+	}
 	return f.reply, f.err
 }
 
@@ -183,7 +191,11 @@ func TestTimer_RandomizedRange(t *testing.T) {
 }
 
 func TestCandidate_IncrementsTermAndVotesSelf(t *testing.T) {
-	n := NewNode("node-0", nil, &fakeTransport{id: "node-0"},
+	// A peer with no reply wired up (fakeTransport.reply stays nil) means
+	// the type assertion in startElection fails and no vote is ever
+	// counted, so this node stays observably in Candidate rather than
+	// racing straight through to Leader with zero peers.
+	n := NewNode("node-0", []string{"node-1"}, &fakeTransport{id: "node-0"},
 		WithElectionTimeout(10*time.Millisecond, 20*time.Millisecond),
 	)
 
@@ -221,5 +233,105 @@ func TestElection_SendsToAllPeers(t *testing.T) {
 
 	if got := ft.sentCount(); got != 4 {
 		t.Fatalf("expected RequestVote sent to all 4 peers, got %d calls", got)
+	}
+}
+
+func TestElection_MajorityWins(t *testing.T) {
+	// 5-node cluster: self + 2 external grants = 3/5, the majority.
+	peers := []string{"node-1", "node-2", "node-3", "node-4"}
+	grant := map[string]bool{"node-1": true, "node-2": true}
+
+	ft := &fakeTransport{
+		id: "node-0",
+		sendFunc: func(target, rpcType string, args any) (any, error) {
+			return RequestVoteReply{Term: 1, VoteGranted: grant[target]}, nil
+		},
+	}
+	n := NewNode("node-0", peers, ft)
+
+	n.mu.Lock()
+	n.becomeCandidateLocked()
+	n.mu.Unlock()
+
+	n.startElection(context.Background())
+
+	if got := n.Role(); got != Leader {
+		t.Fatalf("expected role Leader with 3/5 grants, got %v", got)
+	}
+}
+
+func TestElection_MinorityLoses(t *testing.T) {
+	// 5-node cluster: self + 1 external grant = 2/5, short of the majority (3).
+	peers := []string{"node-1", "node-2", "node-3", "node-4"}
+	grant := map[string]bool{"node-1": true}
+
+	ft := &fakeTransport{
+		id: "node-0",
+		sendFunc: func(target, rpcType string, args any) (any, error) {
+			return RequestVoteReply{Term: 1, VoteGranted: grant[target]}, nil
+		},
+	}
+	n := NewNode("node-0", peers, ft)
+
+	n.mu.Lock()
+	n.becomeCandidateLocked()
+	n.mu.Unlock()
+
+	n.startElection(context.Background())
+
+	if got := n.Role(); got != Candidate {
+		t.Fatalf("expected role to remain Candidate with only 2/5 grants, got %v", got)
+	}
+}
+
+func TestElection_StepsDownOnHigherTerm(t *testing.T) {
+	ft := &fakeTransport{
+		id: "node-0",
+		sendFunc: func(target, rpcType string, args any) (any, error) {
+			return RequestVoteReply{Term: 99, VoteGranted: false}, nil
+		},
+	}
+	n := NewNode("node-0", []string{"node-1"}, ft)
+
+	n.mu.Lock()
+	n.becomeCandidateLocked()
+	n.mu.Unlock()
+
+	n.startElection(context.Background())
+
+	if got := n.Role(); got != Follower {
+		t.Fatalf("expected role Follower after a higher-term reply, got %v", got)
+	}
+	n.mu.Lock()
+	term := n.currentTerm
+	n.mu.Unlock()
+	if term != 99 {
+		t.Fatalf("expected currentTerm updated to 99, got %d", term)
+	}
+}
+
+func TestHeartbeat_SuppressesElection(t *testing.T) {
+	n := NewNode("node-0", nil, &fakeTransport{id: "node-0"},
+		WithElectionTimeout(50*time.Millisecond, 80*time.Millisecond),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.runElectionTimer(ctx)
+
+	stop := time.After(1 * time.Second)
+	heartbeat := time.NewTicker(20 * time.Millisecond)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-stop:
+			if got := n.Role(); got != Follower {
+				t.Fatalf("expected role to remain Follower under steady heartbeats, got %v", got)
+			}
+			return
+		case <-heartbeat.C:
+			n.HandleAppendEntries(AppendEntriesArgs{Term: 1, LeaderID: "node-1"})
+		}
 	}
 }
