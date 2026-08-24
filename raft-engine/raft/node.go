@@ -166,6 +166,24 @@ func (n *Node) Role() Role {
 	return n.role
 }
 
+// CommitIndex returns the node's current commit index. Safe for concurrent use.
+func (n *Node) CommitIndex() int64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.commitIndex
+}
+
+// majority returns the number of votes/replicas needed for a majority of
+// the full, fixed, configured cluster size (len(n.peers)+1, including this
+// node) — never a count of peers that happen to be reachable or have
+// responded right now. n.peers is set once at construction and never
+// shrinks, so this is always the same value regardless of live reachability
+// (Invariant I-08: computing majority from reachable-peer count is exactly
+// the bug that lets a minority partition believe it has quorum).
+func (n *Node) majority() int {
+	return (len(n.peers)+1)/2 + 1
+}
+
 // Term returns the node's current term. Safe for concurrent use.
 func (n *Node) Term() int64 {
 	n.mu.Lock()

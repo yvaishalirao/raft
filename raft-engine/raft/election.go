@@ -192,7 +192,7 @@ func (n *Node) startElection(ctx context.Context) {
 		lastIndex, lastTerm = last.Index, last.Term
 	}
 	peers := append([]string(nil), n.peers...)
-	majority := (len(peers)+1)/2 + 1
+	majority := n.majority()
 
 	votes := 1 // self-vote
 	wonImmediately := votes >= majority && n.becomeLeaderLocked(term)

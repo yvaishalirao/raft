@@ -1,4 +1,4 @@
-.PHONY: build test lint proto demo isolation
+.PHONY: build test lint proto demo isolation majority
 
 build:
 	go build ./...
@@ -20,3 +20,6 @@ demo:
 
 isolation:
 	bash scripts/check_isolation.sh
+
+majority:
+	bash scripts/check_majority.sh

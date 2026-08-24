@@ -236,7 +236,7 @@ func (n *Node) replicateTo(ctx context.Context, peer string) {
 // commits such entries only indirectly, as a side effect of a later
 // current-term entry committing. Callers must already hold n.mu.
 func (n *Node) advanceCommitIndexLocked() {
-	majority := (len(n.peers)+1)/2 + 1
+	majority := n.majority()
 
 	for N := n.lastLogIndexLocked(); N > n.commitIndex; N-- {
 		entry, ok := n.entryAtLocked(N)
