@@ -57,6 +57,7 @@ type Node struct {
 	resetElectionSignal chan struct{}
 
 	onRoleChange func(Role, int64)
+	applyFunc    func(LogEntry)
 }
 
 // NodeOption configures optional Node behavior at construction time.
@@ -93,6 +94,15 @@ func WithOnRoleChange(fn func(Role, int64)) NodeOption {
 	}
 }
 
+// WithApplyFunc registers the state-machine apply callback. When set, Run
+// starts a background loop that calls fn, in order, for every newly
+// committed log entry. When unset, no apply loop runs.
+func WithApplyFunc(fn func(LogEntry)) NodeOption {
+	return func(n *Node) {
+		n.applyFunc = fn
+	}
+}
+
 func NewNode(id string, peers []string, transport Transport, opts ...NodeOption) *Node {
 	n := &Node{
 		id:                  id,
@@ -111,10 +121,14 @@ func NewNode(id string, peers []string, transport Transport, opts ...NodeOption)
 	return n
 }
 
-// Run starts the election timer and then dispatches every inbound RPC to
-// its handler until ctx is done.
+// Run starts the election timer, the apply loop (if an apply function was
+// configured), and then dispatches every inbound RPC to its handler until
+// ctx is done.
 func (n *Node) Run(ctx context.Context) error {
 	go n.runElectionTimer(ctx)
+	if n.applyFunc != nil {
+		go n.runApplyLoop(ctx, n.applyFunc)
+	}
 
 	for {
 		rpc, ok := n.transport.Recv(ctx)
@@ -205,6 +219,47 @@ func (n *Node) Propose(ctx context.Context, command []byte) (int64, error) {
 		case <-ctx.Done():
 			return newIndex, ctx.Err()
 		case <-ticker.C:
+		}
+	}
+}
+
+// runApplyLoop watches commitIndex and calls apply, in strict index order,
+// for each newly committed entry, updating lastApplied as it goes. apply is
+// never called for an index beyond commitIndex at the time it's read. Runs
+// until ctx is done.
+func (n *Node) runApplyLoop(ctx context.Context, apply func(LogEntry)) {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for {
+				n.mu.Lock()
+				if n.lastApplied >= n.commitIndex {
+					n.mu.Unlock()
+					break
+				}
+				nextIndex := n.lastApplied + 1
+				entry, ok := n.entryAtLocked(nextIndex)
+				n.mu.Unlock()
+
+				if !ok {
+					// Shouldn't happen in v1 (no log compaction), but don't
+					// spin forever if it somehow does.
+					break
+				}
+
+				apply(entry)
+
+				n.mu.Lock()
+				if nextIndex > n.lastApplied {
+					n.lastApplied = nextIndex
+				}
+				n.mu.Unlock()
+			}
 		}
 	}
 }

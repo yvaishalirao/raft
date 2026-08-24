@@ -17,6 +17,12 @@ type Cluster struct {
 
 	ids     []string
 	cancels []context.CancelFunc
+
+	// seed and applyObserver are retained (beyond NewCluster's own use) so
+	// Revive can reconstruct a node with the same observability the rest
+	// of the cluster has, rather than silently going dark after a restart.
+	seed          int64
+	applyObserver func(nodeID string, e raft.LogEntry)
 }
 
 // ClusterOption configures optional NewCluster behavior.
@@ -25,6 +31,7 @@ type ClusterOption func(*clusterConfig)
 type clusterConfig struct {
 	seed         int64
 	onRoleChange func(nodeID string, role raft.Role, term int64)
+	onApply      func(nodeID string, e raft.LogEntry)
 }
 
 // WithSeed makes every node's election-timeout jitter deterministic,
@@ -38,6 +45,12 @@ func WithSeed(seed int64) ClusterOption {
 // the cluster changes role, identifying which node it was.
 func WithRoleChangeObserver(fn func(nodeID string, role raft.Role, term int64)) ClusterOption {
 	return func(c *clusterConfig) { c.onRoleChange = fn }
+}
+
+// WithApplyObserver registers a callback invoked whenever any node in the
+// cluster applies a committed log entry, identifying which node it was.
+func WithApplyObserver(fn func(nodeID string, e raft.LogEntry)) ClusterOption {
+	return func(c *clusterConfig) { c.onApply = fn }
 }
 
 func NewCluster(t *testing.T, n int, opts ...ClusterOption) *Cluster {
@@ -56,8 +69,10 @@ func NewCluster(t *testing.T, n int, opts ...ClusterOption) *Cluster {
 	router := rpc.NewInMemoryRouter(ids)
 
 	c := &Cluster{
-		Router: router,
-		ids:    ids,
+		Router:        router,
+		ids:           ids,
+		seed:          cfg.seed,
+		applyObserver: cfg.onApply,
 	}
 
 	for i, id := range ids {
@@ -70,6 +85,11 @@ func NewCluster(t *testing.T, n int, opts ...ClusterOption) *Cluster {
 		if cfg.onRoleChange != nil {
 			nodeOpts = append(nodeOpts, raft.WithOnRoleChange(func(role raft.Role, term int64) {
 				cfg.onRoleChange(id, role, term)
+			}))
+		}
+		if cfg.onApply != nil {
+			nodeOpts = append(nodeOpts, raft.WithApplyFunc(func(e raft.LogEntry) {
+				cfg.onApply(id, e)
 			}))
 		}
 
@@ -132,11 +152,18 @@ func (c *Cluster) KillNode(id string) {
 // Revive replaces node id with a fresh, empty raft.Node and starts it
 // running again. Per the v1 no-persistence design, a restart legitimately
 // comes back with no memory of prior state — it must reconcile via
-// AppendEntries like any other straggling follower.
+// AppendEntries like any other straggling follower. If the cluster was
+// built with WithApplyObserver, the revived node keeps reporting to it.
 func (c *Cluster) Revive(id string, opts ...raft.NodeOption) *raft.Node {
 	for i, nid := range c.ids {
 		if nid != id {
 			continue
+		}
+
+		if c.applyObserver != nil {
+			opts = append(opts, raft.WithApplyFunc(func(e raft.LogEntry) {
+				c.applyObserver(id, e)
+			}))
 		}
 
 		transport := c.Router.Transport(id)
