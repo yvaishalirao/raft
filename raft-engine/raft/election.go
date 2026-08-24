@@ -276,6 +276,16 @@ func (n *Node) becomeLeaderLocked(term int64) bool {
 		return false
 	}
 	n.role = Leader
+
+	lastIndex := n.lastLogIndexLocked()
+	n.nextIndex = make(map[string]int64, len(n.peers))
+	n.matchIndex = make(map[string]int64, len(n.peers))
+	n.replicatingTo = make(map[string]bool, len(n.peers))
+	for _, p := range n.peers {
+		n.nextIndex[p] = lastIndex + 1
+		n.matchIndex[p] = 0
+	}
+
 	return true
 }
 
@@ -288,8 +298,10 @@ func (n *Node) fireRoleChange(role Role, term int64) {
 }
 
 // startHeartbeats runs as a goroutine for as long as this node remains
-// leader of term, sending empty AppendEntries (heartbeats) to every peer on
-// a fixed interval to suppress followers' elections.
+// leader of term, calling replicateTo for every peer on a fixed interval.
+// This both suppresses followers' elections and, since replicateTo sends
+// whatever backlog a peer's nextIndex says it's missing, is how a
+// straggling follower catches up outside of an explicit Propose call.
 func (n *Node) startHeartbeats(ctx context.Context) {
 	n.mu.Lock()
 	term := n.currentTerm
@@ -306,8 +318,6 @@ func (n *Node) startHeartbeats(ctx context.Context) {
 		case <-ticker.C:
 			n.mu.Lock()
 			stillLeader := n.role == Leader && n.currentTerm == term
-			leaderID := n.id
-			commit := n.commitIndex
 			peers := append([]string(nil), n.peers...)
 			n.mu.Unlock()
 
@@ -317,28 +327,24 @@ func (n *Node) startHeartbeats(ctx context.Context) {
 
 			for _, peer := range peers {
 				peer := peer
-				go func() {
-					hctx, cancel := context.WithTimeout(ctx, interval)
-					defer cancel()
-
-					reply, err := n.transport.Send(hctx, peer, "AppendEntries", AppendEntriesArgs{
-						Term:         term,
-						LeaderID:     leaderID,
-						LeaderCommit: commit,
-					})
-					if err != nil {
-						return
-					}
-					ar, ok := reply.(AppendEntriesReply)
-					if !ok {
-						return
-					}
-
-					n.mu.Lock()
-					if ar.Term > n.currentTerm {
-						n.updateTerm(ar.Term)
-					}
+				n.mu.Lock()
+				if n.replicatingTo[peer] {
+					// A previous tick's replicateTo call to this peer
+					// hasn't finished yet — skip rather than pile up
+					// another goroutine on top of it.
 					n.mu.Unlock()
+					continue
+				}
+				n.replicatingTo[peer] = true
+				n.mu.Unlock()
+
+				go func() {
+					defer func() {
+						n.mu.Lock()
+						delete(n.replicatingTo, peer)
+						n.mu.Unlock()
+					}()
+					n.replicateTo(ctx, peer)
 				}()
 			}
 		}

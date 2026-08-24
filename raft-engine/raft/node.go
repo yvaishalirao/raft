@@ -15,8 +15,10 @@ const (
 )
 
 var (
-	errUnexpectedRPCArgs = errors.New("raft: unexpected RPC argument type")
-	errUnknownRPCType    = errors.New("raft: unknown RPC type")
+	errUnexpectedRPCArgs   = errors.New("raft: unexpected RPC argument type")
+	errUnknownRPCType      = errors.New("raft: unknown RPC type")
+	errNotLeader           = errors.New("raft: not leader")
+	errProposeNotCommitted = errors.New("raft: entry not committed before leadership ended or context was done")
 )
 
 type Node struct {
@@ -33,6 +35,15 @@ type Node struct {
 
 	peers     []string
 	transport Transport
+
+	// nextIndex and matchIndex are leader-only replication state, reset
+	// every time this node wins an election (see becomeLeaderLocked).
+	// replicatingTo tracks which peers currently have an in-flight
+	// replicateTo call, bounding startHeartbeats to at most one concurrent
+	// goroutine per peer rather than piling more up on every tick.
+	nextIndex     map[string]int64
+	matchIndex    map[string]int64
+	replicatingTo map[string]bool
 
 	electionTimeoutMin time.Duration
 	electionTimeoutMax time.Duration
@@ -151,6 +162,60 @@ func (n *Node) Term() int64 {
 // ID returns the node's own ID.
 func (n *Node) ID() string {
 	return n.id
+}
+
+// Propose appends command to the leader's log and blocks until it has been
+// replicated to a majority (i.e. committed), ctx is done, or this node
+// stops being the leader of the term it proposed under — whichever comes
+// first. Returns the log index the entry was assigned.
+func (n *Node) Propose(ctx context.Context, command []byte) (int64, error) {
+	n.mu.Lock()
+	if n.role != Leader {
+		n.mu.Unlock()
+		return 0, errNotLeader
+	}
+	term := n.currentTerm
+	newIndex := n.lastLogIndexLocked() + 1
+	n.appendAsLeader(LogEntry{Index: newIndex, Term: term, Command: command})
+	peers := append([]string(nil), n.peers...)
+	n.mu.Unlock()
+
+	for _, peer := range peers {
+		peer := peer
+		go n.replicateTo(ctx, peer)
+	}
+
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		n.mu.Lock()
+		committed := n.commitIndex >= newIndex
+		stillCurrentLeader := n.role == Leader && n.currentTerm == term
+		n.mu.Unlock()
+
+		if committed {
+			return newIndex, nil
+		}
+		if !stillCurrentLeader {
+			return newIndex, errProposeNotCommitted
+		}
+
+		select {
+		case <-ctx.Done():
+			return newIndex, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// lastLogIndexLocked returns this node's last log index, or 0 if its log is
+// empty. Callers must already hold n.mu.
+func (n *Node) lastLogIndexLocked() int64 {
+	if len(n.log) == 0 {
+		return 0
+	}
+	return n.log[len(n.log)-1].Index
 }
 
 // mutateLog is the only sanctioned path for mutating n.log. It panics if a

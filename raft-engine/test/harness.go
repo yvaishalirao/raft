@@ -105,6 +105,53 @@ func (c *Cluster) LeaderCount(term int64) int {
 	return count
 }
 
+// NodeByID returns the cluster's current node for id, or nil if unknown.
+// After Revive(id), this returns the new node instance.
+func (c *Cluster) NodeByID(id string) *raft.Node {
+	for i, nid := range c.ids {
+		if nid == id {
+			return c.Nodes[i]
+		}
+	}
+	return nil
+}
+
+// KillNode simulates a crash: it cancels node id's context, which stops its
+// election timer, heartbeats, and RPC dispatch loop, so it stops responding
+// to any RPC. The node stays registered with the router (nothing physically
+// removes it), it simply never answers again until Revive'd.
+func (c *Cluster) KillNode(id string) {
+	for i, nid := range c.ids {
+		if nid == id {
+			c.cancels[i]()
+			return
+		}
+	}
+}
+
+// Revive replaces node id with a fresh, empty raft.Node and starts it
+// running again. Per the v1 no-persistence design, a restart legitimately
+// comes back with no memory of prior state — it must reconcile via
+// AppendEntries like any other straggling follower.
+func (c *Cluster) Revive(id string, opts ...raft.NodeOption) *raft.Node {
+	for i, nid := range c.ids {
+		if nid != id {
+			continue
+		}
+
+		transport := c.Router.Transport(id)
+		node := raft.NewNode(id, peersExcept(c.ids, id), transport, opts...)
+		c.Nodes[i] = node
+
+		ctx, cancel := context.WithCancel(context.Background())
+		c.cancels[i] = cancel
+		go node.Run(ctx)
+
+		return node
+	}
+	return nil
+}
+
 func (c *Cluster) Shutdown() {
 	for _, cancel := range c.cancels {
 		cancel()
