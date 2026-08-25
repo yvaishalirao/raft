@@ -13,15 +13,17 @@ type faultKey struct {
 	from, to string
 }
 
-// FaultState holds fault-injection configuration per (from,to) node pair —
-// dropped, delay, and partitioned — all behind a mutex, mutated only
-// through its exported setters. It is the single source of truth
-// FaultInjectingTransport consults before ever calling the real transport.
+// FaultState holds fault-injection configuration — dropped/delay/
+// partitioned per (from,to) node pair, and killed per single node — all
+// behind a mutex, mutated only through its exported setters. It is the
+// single source of truth FaultInjectingTransport consults before ever
+// calling the real transport.
 type FaultState struct {
 	mu          sync.Mutex
 	dropped     map[faultKey]bool
 	delay       map[faultKey]time.Duration
 	partitioned map[faultKey]bool
+	killed      map[string]bool
 }
 
 func NewFaultState() *FaultState {
@@ -29,7 +31,23 @@ func NewFaultState() *FaultState {
 		dropped:     make(map[faultKey]bool),
 		delay:       make(map[faultKey]time.Duration),
 		partitioned: make(map[faultKey]bool),
+		killed:      make(map[string]bool),
 	}
+}
+
+// SetKilled marks nodeID killed (or, via killed=false, explicitly
+// restarted). Unlike drop/delay/partition, this is keyed per single node,
+// not per pair: a killed node can neither send nor receive anything.
+func (s *FaultState) SetKilled(nodeID string, killed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.killed[nodeID] = killed
+}
+
+func (s *FaultState) isKilled(nodeID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.killed[nodeID]
 }
 
 func (s *FaultState) SetDrop(from, to string, dropped bool) {
@@ -88,6 +106,16 @@ func NewFaultInjectingTransport(inner raft.Transport, state *FaultState) *FaultI
 func (t *FaultInjectingTransport) LocalID() string { return t.selfID }
 
 func (t *FaultInjectingTransport) Send(ctx context.Context, target string, rpcType string, args any) (any, error) {
+	// Kill blocks both directions: a killed caller must not even attempt
+	// delivery (a "dead" node must not go on initiating elections), and a
+	// killed target must never be reached by anyone else's calls either.
+	if t.state.isKilled(t.selfID) {
+		return nil, fmt.Errorf("faultinjection: %s is killed, cannot send", t.selfID)
+	}
+	if t.state.isKilled(target) {
+		return nil, fmt.Errorf("faultinjection: target %s is killed", target)
+	}
+
 	if t.state.isDropped(t.selfID, target) || t.state.isPartitioned(t.selfID, target) {
 		return nil, fmt.Errorf("faultinjection: message from %s to %s blocked", t.selfID, target)
 	}
