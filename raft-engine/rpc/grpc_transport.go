@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -16,14 +17,24 @@ import (
 
 // raftServer adapts a *raft.Node to the generated gRPC service interface,
 // translating protobuf types to/from raft's own plain Go argument/reply
-// types at this boundary — the Raft core itself never sees protobuf.
+// types at this boundary — the Raft core itself never sees protobuf. node
+// is an atomic pointer rather than a plain field so a server can be
+// constructed (and its listener address known) before the Node it will
+// dispatch to exists — the conformance suite's gRPC factory needs exactly
+// that ordering, since peer addresses must be known before nodes are built.
 type raftServer struct {
 	raftpb.UnimplementedRaftRPCServer
-	node *raft.Node
+	node atomic.Pointer[raft.Node]
 }
 
+func (s *raftServer) attach(n *raft.Node) { s.node.Store(n) }
+
 func (s *raftServer) RequestVote(ctx context.Context, in *raftpb.RequestVoteArgs) (*raftpb.RequestVoteReply, error) {
-	reply := s.node.HandleRequestVote(raft.RequestVoteArgs{
+	n := s.node.Load()
+	if n == nil {
+		return nil, fmt.Errorf("grpc: server not yet attached to a node")
+	}
+	reply := n.HandleRequestVote(raft.RequestVoteArgs{
 		Term:         in.GetTerm(),
 		CandidateID:  in.GetCandidateId(),
 		LastLogIndex: in.GetLastLogIndex(),
@@ -33,13 +44,18 @@ func (s *raftServer) RequestVote(ctx context.Context, in *raftpb.RequestVoteArgs
 }
 
 func (s *raftServer) AppendEntries(ctx context.Context, in *raftpb.AppendEntriesArgs) (*raftpb.AppendEntriesReply, error) {
+	n := s.node.Load()
+	if n == nil {
+		return nil, fmt.Errorf("grpc: server not yet attached to a node")
+	}
+
 	pbEntries := in.GetEntries()
 	entries := make([]raft.LogEntry, len(pbEntries))
 	for i, e := range pbEntries {
 		entries[i] = raft.LogEntry{Index: e.GetIndex(), Term: e.GetTerm(), Command: e.GetCommand()}
 	}
 
-	reply := s.node.HandleAppendEntries(raft.AppendEntriesArgs{
+	reply := n.HandleAppendEntries(raft.AppendEntriesArgs{
 		Term:         in.GetTerm(),
 		LeaderID:     in.GetLeaderId(),
 		PrevLogIndex: in.GetPrevLogIndex(),
@@ -58,15 +74,30 @@ func (s *raftServer) AppendEntries(ctx context.Context, in *raftpb.AppendEntries
 // AppendEntries to node. It returns the server and its listener unstarted
 // (Serve not yet called) so the caller controls the server's lifecycle.
 func NewGRPCServer(node *raft.Node, addr string) (*grpc.Server, net.Listener, error) {
+	srv, lis, rs, err := newDetachedGRPCServer(addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	rs.attach(node)
+	return srv, lis, nil
+}
+
+// newDetachedGRPCServer starts listening and registers the RaftRPC service
+// without yet knowing which Node it will dispatch to — used where the
+// listener's address must be known before the Node exists (see raftServer).
+// Call attach on the returned *raftServer once the Node is built, before
+// any real traffic is expected.
+func newDetachedGRPCServer(addr string) (*grpc.Server, net.Listener, *raftServer, error) {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("grpc: listen on %s: %w", addr, err)
+		return nil, nil, nil, fmt.Errorf("grpc: listen on %s: %w", addr, err)
 	}
 
+	rs := &raftServer{}
 	srv := grpc.NewServer()
-	raftpb.RegisterRaftRPCServer(srv, &raftServer{node: node})
+	raftpb.RegisterRaftRPCServer(srv, rs)
 
-	return srv, lis, nil
+	return srv, lis, rs, nil
 }
 
 // GRPCTransport implements raft.Transport over real gRPC: it dials peers
