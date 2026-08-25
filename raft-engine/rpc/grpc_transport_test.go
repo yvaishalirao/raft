@@ -100,3 +100,85 @@ func TestGRPC_AppendEntriesRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestGRPC_TimeoutReturnsError(t *testing.T) {
+	// Reserve a port, then immediately close it so nothing is listening —
+	// a guaranteed-unreachable but syntactically valid address.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port: %v", err)
+	}
+	deadAddr := lis.Addr().String()
+	lis.Close()
+
+	transport := NewGRPCTransport("node-a", map[string]string{"node-b": deadAddr})
+	transport.CallTimeout = 500 * time.Millisecond
+	defer transport.Close()
+
+	start := time.Now()
+	_, err = transport.Send(context.Background(), "node-b", "RequestVote", raft.RequestVoteArgs{Term: 1})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error calling an unreachable peer, got nil")
+	}
+	if elapsed > transport.CallTimeout+500*time.Millisecond {
+		t.Fatalf("expected Send to return within CallTimeout+buffer (%v), took %v", transport.CallTimeout+500*time.Millisecond, elapsed)
+	}
+}
+
+func TestGRPC_ConnectionReuse(t *testing.T) {
+	nodeB := raft.NewNode("node-b", []string{"node-a"}, nil)
+	srvB, lisB, err := NewGRPCServer(nodeB, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewGRPCServer failed: %v", err)
+	}
+	defer srvB.Stop()
+	go srvB.Serve(lisB)
+
+	transportA := NewGRPCTransport("node-a", map[string]string{"node-b": lisB.Addr().String()})
+	defer transportA.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	for i := 0; i < 2; i++ {
+		if _, err := transportA.Send(ctx, "node-b", "RequestVote", raft.RequestVoteArgs{Term: 1}); err != nil {
+			t.Fatalf("call %d failed: %v", i, err)
+		}
+	}
+
+	transportA.mu.Lock()
+	connCount := len(transportA.conns)
+	transportA.mu.Unlock()
+
+	if connCount != 1 {
+		t.Fatalf("expected exactly 1 cached connection after 2 calls to the same peer, got %d", connCount)
+	}
+}
+
+func TestGRPC_NeverPanicsOnDeadConn(t *testing.T) {
+	nodeB := raft.NewNode("node-b", []string{"node-a"}, nil)
+	srvB, lisB, err := NewGRPCServer(nodeB, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewGRPCServer failed: %v", err)
+	}
+	addr := lisB.Addr().String()
+	go srvB.Serve(lisB)
+	srvB.Stop() // kill it immediately, before any call is made
+
+	transportA := NewGRPCTransport("node-a", map[string]string{"node-b": addr})
+	transportA.CallTimeout = 300 * time.Millisecond
+	defer transportA.Close()
+
+	for i := 0; i < 5; i++ {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("call %d panicked: %v", i, r)
+				}
+			}()
+			_, _ = transportA.Send(context.Background(), "node-b", "RequestVote", raft.RequestVoteArgs{Term: 1})
+		}()
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -74,6 +75,14 @@ type GRPCTransport struct {
 	selfID    string
 	peerAddrs map[string]string
 
+	// DialTimeout bounds how long a single underlying connection attempt
+	// may take before grpc-go's internal retry/backoff gives up and tries
+	// again. CallTimeout bounds every individual RPC — Send wraps its call
+	// in context.WithTimeout(ctx, CallTimeout) so a slow or dead peer can
+	// never block the caller indefinitely.
+	DialTimeout time.Duration
+	CallTimeout time.Duration
+
 	mu    sync.Mutex
 	conns map[string]*grpc.ClientConn
 
@@ -86,17 +95,27 @@ type GRPCTransport struct {
 	inbox chan raft.RPC
 }
 
+const (
+	DefaultDialTimeout = 2 * time.Second
+	DefaultCallTimeout = 2 * time.Second
+)
+
 func NewGRPCTransport(selfID string, peerAddrs map[string]string) *GRPCTransport {
 	return &GRPCTransport{
-		selfID:    selfID,
-		peerAddrs: peerAddrs,
-		conns:     make(map[string]*grpc.ClientConn),
-		inbox:     make(chan raft.RPC),
+		selfID:      selfID,
+		peerAddrs:   peerAddrs,
+		DialTimeout: DefaultDialTimeout,
+		CallTimeout: DefaultCallTimeout,
+		conns:       make(map[string]*grpc.ClientConn),
+		inbox:       make(chan raft.RPC),
 	}
 }
 
 func (t *GRPCTransport) LocalID() string { return t.selfID }
 
+// clientFor returns a client for target, reusing a single cached
+// *grpc.ClientConn per peer (lazy-dial on first use) rather than dialing
+// per call.
 func (t *GRPCTransport) clientFor(target string) (raftpb.RaftRPCClient, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -110,7 +129,10 @@ func (t *GRPCTransport) clientFor(target string) (raftpb.RaftRPCClient, error) {
 		return nil, fmt.Errorf("grpc: no address known for peer %q", target)
 	}
 
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithConnectParams(grpc.ConnectParams{MinConnectTimeout: t.DialTimeout}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("grpc: dial %s: %w", addr, err)
 	}
@@ -118,11 +140,17 @@ func (t *GRPCTransport) clientFor(target string) (raftpb.RaftRPCClient, error) {
 	return raftpb.NewRaftRPCClient(conn), nil
 }
 
+// Send never panics and never blocks past CallTimeout: a dead peer, a
+// connection that can't be established, or a call that times out all
+// surface as a plain wrapped error.
 func (t *GRPCTransport) Send(ctx context.Context, target string, rpcType string, args any) (any, error) {
 	client, err := t.clientFor(target)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("grpc: %w", err)
 	}
+
+	cctx, cancel := context.WithTimeout(ctx, t.CallTimeout)
+	defer cancel()
 
 	switch rpcType {
 	case "RequestVote":
@@ -130,14 +158,14 @@ func (t *GRPCTransport) Send(ctx context.Context, target string, rpcType string,
 		if !ok {
 			return nil, fmt.Errorf("grpc: unexpected args type for RequestVote: %T", args)
 		}
-		reply, err := client.RequestVote(ctx, &raftpb.RequestVoteArgs{
+		reply, err := client.RequestVote(cctx, &raftpb.RequestVoteArgs{
 			Term:         a.Term,
 			CandidateId:  a.CandidateID,
 			LastLogIndex: a.LastLogIndex,
 			LastLogTerm:  a.LastLogTerm,
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("grpc: RequestVote to %s: %w", target, err)
 		}
 		return raft.RequestVoteReply{Term: reply.GetTerm(), VoteGranted: reply.GetVoteGranted()}, nil
 
@@ -150,7 +178,7 @@ func (t *GRPCTransport) Send(ctx context.Context, target string, rpcType string,
 		for i, e := range a.Entries {
 			pbEntries[i] = &raftpb.LogEntry{Index: e.Index, Term: e.Term, Command: e.Command}
 		}
-		reply, err := client.AppendEntries(ctx, &raftpb.AppendEntriesArgs{
+		reply, err := client.AppendEntries(cctx, &raftpb.AppendEntriesArgs{
 			Term:         a.Term,
 			LeaderId:     a.LeaderID,
 			PrevLogIndex: a.PrevLogIndex,
@@ -159,7 +187,7 @@ func (t *GRPCTransport) Send(ctx context.Context, target string, rpcType string,
 			LeaderCommit: a.LeaderCommit,
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("grpc: AppendEntries to %s: %w", target, err)
 		}
 		return raft.AppendEntriesReply{
 			Term:          reply.GetTerm(),
