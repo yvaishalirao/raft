@@ -45,8 +45,13 @@ func runScenario(t *testing.T, transportFactory func([]string) map[string]raft.T
 	nodes := make(map[string]*raft.Node, len(ids))
 	for _, id := range ids {
 		peers := idsExcept(ids, id)
+		// Election timeout must stay comfortably larger than the (default
+		// 50ms) heartbeat interval — NFR3 — or a follower's timer can fire
+		// in the gap between heartbeats even under healthy conditions.
+		// Real gRPC's network overhead makes this margin more important
+		// here than for the in-memory path, not less.
 		n := raft.NewNode(id, peers, transports[id],
-			raft.WithElectionTimeout(50*time.Millisecond, 100*time.Millisecond),
+			raft.WithElectionTimeout(150*time.Millisecond, 300*time.Millisecond),
 		)
 		nodes[id] = n
 		if a, ok := transports[id].(attacher); ok {
@@ -66,7 +71,11 @@ func runScenario(t *testing.T, transportFactory func([]string) map[string]raft.T
 		}
 	})
 
-	deadline := time.Now().Add(3 * time.Second)
+	// 10s, not 5s: the very first gRPC dial/listen in a fresh process can
+	// carry several seconds of one-time OS-level cold-start latency
+	// (observed on Windows) that has nothing to do with Raft's own
+	// election timing — later runs in the same process are fast.
+	deadline := time.Now().Add(10 * time.Second)
 	var leader *raft.Node
 	for time.Now().Before(deadline) {
 		for _, n := range nodes {

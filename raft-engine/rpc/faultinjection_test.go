@@ -37,9 +37,12 @@ func buildFaultInjectedCluster(ids []string, state *FaultState) (nodes []*raft.N
 	var cancels []context.CancelFunc
 
 	for i, id := range ids {
+		// Election timeout must stay comfortably larger than the (default
+		// 50ms) heartbeat interval — NFR3 — or a follower's timer can fire
+		// in the gap between heartbeats even under healthy conditions.
 		wrapped := NewFaultInjectingTransport(router.Transport(id), state)
 		nodes[i] = raft.NewNode(id, idsExcept(ids, id), wrapped,
-			raft.WithElectionTimeout(50*time.Millisecond, 100*time.Millisecond),
+			raft.WithElectionTimeout(150*time.Millisecond, 300*time.Millisecond),
 		)
 		ctx, c := context.WithCancel(context.Background())
 		cancels = append(cancels, c)

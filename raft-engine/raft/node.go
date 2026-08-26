@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -32,6 +33,11 @@ type Node struct {
 	commitIndex int64
 	lastApplied int64
 	termHistory []int64
+
+	// knownLeaderID is updated whenever this node observes a valid
+	// AppendEntries carrying a current-or-newer term, so a follower can
+	// point a misdirected client at the leader it currently knows about.
+	knownLeaderID string
 
 	peers     []string
 	transport Transport
@@ -121,13 +127,26 @@ func NewNode(id string, peers []string, transport Transport, opts ...NodeOption)
 	return n
 }
 
+// SetApplyFunc registers the apply-loop callback after construction — for
+// callers (like kv.NewStore) that need an existing *Node to build their
+// callback from. Must be called before Run(ctx) starts.
+func (n *Node) SetApplyFunc(fn func(LogEntry)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.applyFunc = fn
+}
+
 // Run starts the election timer, the apply loop (if an apply function was
 // configured), and then dispatches every inbound RPC to its handler until
 // ctx is done.
 func (n *Node) Run(ctx context.Context) error {
 	go n.runElectionTimer(ctx)
-	if n.applyFunc != nil {
-		go n.runApplyLoop(ctx, n.applyFunc)
+
+	n.mu.Lock()
+	applyFn := n.applyFunc
+	n.mu.Unlock()
+	if applyFn != nil {
+		go n.runApplyLoop(ctx, applyFn)
 	}
 
 	for {
@@ -196,6 +215,32 @@ func (n *Node) ID() string {
 	return n.id
 }
 
+// KnownLeaderID returns the ID of the leader this node most recently
+// observed a valid AppendEntries from, or "" if none yet. Lets a follower
+// redirect a misdirected client rather than just rejecting it blind.
+func (n *Node) KnownLeaderID() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.knownLeaderID
+}
+
+// ProposeAsync appends command to the leader's log and returns immediately
+// with the assigned index, without waiting for replication or commit.
+// This exists for tests exercising apply-after-commit-only behavior —
+// production write paths must use the commit-blocking Propose, or a
+// client could observe success before durability is guaranteed.
+func (n *Node) ProposeAsync(command []byte) (int64, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.role != Leader {
+		return 0, errNotLeader
+	}
+	newIndex := n.lastLogIndexLocked() + 1
+	n.appendAsLeader(LogEntry{Index: newIndex, Term: n.currentTerm, Command: command})
+	return newIndex, nil
+}
+
 // Propose appends command to the leader's log and blocks until it has been
 // replicated to a majority (i.e. committed), ctx is done, or this node
 // stops being the leader of the term it proposed under — whichever comes
@@ -209,6 +254,11 @@ func (n *Node) Propose(ctx context.Context, command []byte) (int64, error) {
 	term := n.currentTerm
 	newIndex := n.lastLogIndexLocked() + 1
 	n.appendAsLeader(LogEntry{Index: newIndex, Term: term, Command: command})
+	// Handle the case where this node alone is already a majority (e.g. a
+	// single-node cluster) — advanceCommitIndexLocked is otherwise only
+	// triggered from a peer's reply in replicateTo, which never runs if
+	// there are no peers to replicate to.
+	n.advanceCommitIndexLocked()
 	peers := append([]string(nil), n.peers...)
 	n.mu.Unlock()
 
@@ -254,31 +304,49 @@ func (n *Node) runApplyLoop(ctx context.Context, apply func(LogEntry)) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for {
-				n.mu.Lock()
-				if n.lastApplied >= n.commitIndex {
-					n.mu.Unlock()
-					break
-				}
-				nextIndex := n.lastApplied + 1
-				entry, ok := n.entryAtLocked(nextIndex)
-				n.mu.Unlock()
-
-				if !ok {
-					// Shouldn't happen in v1 (no log compaction), but don't
-					// spin forever if it somehow does.
-					break
-				}
-
-				apply(entry)
-
-				n.mu.Lock()
-				if nextIndex > n.lastApplied {
-					n.lastApplied = nextIndex
-				}
-				n.mu.Unlock()
+			for n.tryApplyNext(apply) {
 			}
 		}
+	}
+}
+
+// tryApplyNext applies the next committed-but-unapplied entry, if any.
+// Returns true if it applied one (the caller should call again to drain
+// any further backlog), false if there's nothing left to apply right now.
+func (n *Node) tryApplyNext(apply func(LogEntry)) bool {
+	n.mu.Lock()
+	if n.lastApplied >= n.commitIndex {
+		n.mu.Unlock()
+		return false
+	}
+	nextIndex := n.lastApplied + 1
+	n.assertNotBeyondCommitLocked(nextIndex)
+	entry, ok := n.entryAtLocked(nextIndex)
+	n.mu.Unlock()
+
+	if !ok {
+		// Shouldn't happen in v1 (no log compaction), but don't spin
+		// forever if it somehow does.
+		return false
+	}
+
+	apply(entry)
+
+	n.mu.Lock()
+	if nextIndex > n.lastApplied {
+		n.lastApplied = nextIndex
+	}
+	n.mu.Unlock()
+	return true
+}
+
+// assertNotBeyondCommitLocked panics if index is beyond commitIndex —
+// defense-in-depth on top of the invariant tryApplyNext's own loop guard
+// already maintains by construction (Invariant I-18: apply-after-commit
+// only). Callers must already hold n.mu.
+func (n *Node) assertNotBeyondCommitLocked(index int64) {
+	if index > n.commitIndex {
+		panic(fmt.Sprintf("raft: attempted to apply index %d beyond commitIndex %d", index, n.commitIndex))
 	}
 }
 

@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -371,4 +372,77 @@ func (n *Node) restart() {
 // any RPC-handling path can call it by accident.
 func (n *Node) Restart() {
 	n.restart()
+}
+
+// ConfirmLeadership performs a lightweight read-index check: one round of
+// empty AppendEntries (heartbeats, no log entries) sent to every peer
+// concurrently, returning nil once a majority (including this node) has
+// acknowledged within ctx's deadline while still recognizing this node as
+// leader of its current term. This is the basis for serving a
+// linearizable read without appending a new log entry — callers must
+// serve the read only after this returns nil, never speculatively.
+func (n *Node) ConfirmLeadership(ctx context.Context) error {
+	n.mu.Lock()
+	if n.role != Leader {
+		n.mu.Unlock()
+		return errNotLeader
+	}
+	term := n.currentTerm
+	leaderID := n.id
+	commit := n.commitIndex
+	peers := append([]string(nil), n.peers...)
+	majority := n.majority()
+	n.mu.Unlock()
+
+	if majority <= 1 {
+		return nil // single-node cluster: this node alone is already a majority
+	}
+
+	var countMu sync.Mutex
+	acks := 1 // self
+	confirmed := make(chan struct{})
+	var once sync.Once
+
+	var wg sync.WaitGroup
+	for _, peer := range peers {
+		peer := peer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reply, err := n.transport.Send(ctx, peer, "AppendEntries", AppendEntriesArgs{
+				Term:         term,
+				LeaderID:     leaderID,
+				LeaderCommit: commit,
+			})
+			if err != nil {
+				return
+			}
+			ar, ok := reply.(AppendEntriesReply)
+			if !ok || ar.Term > term || !ar.Success {
+				return
+			}
+
+			countMu.Lock()
+			acks++
+			gotMajority := acks >= majority
+			countMu.Unlock()
+			if gotMajority {
+				once.Do(func() { close(confirmed) })
+			}
+		}()
+	}
+	go wg.Wait()
+
+	select {
+	case <-confirmed:
+		n.mu.Lock()
+		stillLeader := n.role == Leader && n.currentTerm == term
+		n.mu.Unlock()
+		if !stillLeader {
+			return errNotLeader
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("raft: could not confirm majority leadership within timeout: %w", ctx.Err())
+	}
 }

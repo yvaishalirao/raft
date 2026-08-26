@@ -89,3 +89,26 @@ func TestApplyLoop_NeverAppliesUncommitted(t *testing.T) {
 		t.Fatalf("expected exactly index 1 applied (commitIndex never advanced past it), got %v", appliedIndexes)
 	}
 }
+
+// TestApplyLoop_PanicsOnPrematureApply exercises the defense-in-depth
+// guard directly: tryApplyNext's own loop condition makes it mathematically
+// unreachable via normal operation (lastApplied<commitIndex always implies
+// lastApplied+1<=commitIndex for integers), so this test invokes the guard
+// function itself with a hand-crafted index beyond commitIndex — the
+// "throwaway test double" scenario 8.3 calls for.
+func TestApplyLoop_PanicsOnPrematureApply(t *testing.T) {
+	n := NewNode("node-0", nil, nil)
+	n.mu.Lock()
+	n.commitIndex = 2
+	n.mu.Unlock()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected a panic when asserting an index beyond commitIndex")
+		}
+	}()
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.assertNotBeyondCommitLocked(5)
+}

@@ -33,6 +33,7 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	}
 
 	n.role = Follower
+	n.knownLeaderID = args.LeaderID
 	n.resetElectionTimerLocked()
 
 	if args.PrevLogIndex > 0 {
