@@ -364,3 +364,11 @@ func (n *Node) restart() {
 	n.termHistory = nil
 	n.role = Follower
 }
+
+// Restart is the exported entry point for restart, reachable by
+// legitimate process-supervisor code (the control plane's /restart
+// endpoint) — restart itself stays unexported so nothing inside raft/ or
+// any RPC-handling path can call it by accident.
+func (n *Node) Restart() {
+	n.restart()
+}
