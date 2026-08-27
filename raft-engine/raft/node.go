@@ -64,6 +64,7 @@ type Node struct {
 
 	onRoleChange func(Role, int64)
 	applyFunc    func(LogEntry)
+	eventSink    func(Event)
 }
 
 // NodeOption configures optional Node behavior at construction time.
@@ -370,6 +371,13 @@ func (n *Node) mutateLog(op string, fn func()) {
 func (n *Node) appendAsLeader(e LogEntry) {
 	n.mutateLog("append", func() {
 		n.log = append(n.log, e)
+	})
+	n.emitEventLocked(Event{
+		Type:        LogAppend,
+		Term:        n.currentTerm,
+		Role:        n.role.String(),
+		LogLength:   len(n.log),
+		CommitIndex: n.commitIndex,
 	})
 }
 

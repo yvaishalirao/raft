@@ -253,6 +253,13 @@ func (n *Node) advanceCommitIndexLocked() {
 		}
 		if count >= majority {
 			n.commitIndex = N
+			n.emitEventLocked(Event{
+				Type:        Commit,
+				Term:        n.currentTerm,
+				Role:        n.role.String(),
+				LogLength:   len(n.log),
+				CommitIndex: n.commitIndex,
+			})
 			return
 		}
 	}

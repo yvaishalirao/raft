@@ -16,10 +16,15 @@ func (n *Node) updateTerm(newTerm int64) bool {
 	if newTerm <= n.currentTerm {
 		return false
 	}
+	prevRole := n.role
 	n.currentTerm = newTerm
 	n.votedFor = ""
 	n.role = Follower
 	n.termHistory = append(n.termHistory, newTerm)
+	n.emitEventLocked(Event{Type: TermBump, Term: newTerm, Role: n.role.String()})
+	if prevRole != Follower {
+		n.emitEventLocked(Event{Type: RoleChange, Term: newTerm, Role: n.role.String()})
+	}
 	return true
 }
 
@@ -165,6 +170,8 @@ func (n *Node) becomeCandidateLocked() {
 	n.currentTerm++
 	n.votedFor = n.id
 	n.termHistory = append(n.termHistory, n.currentTerm)
+	n.emitEventLocked(Event{Type: TermBump, Term: n.currentTerm, Role: n.role.String()})
+	n.emitEventLocked(Event{Type: RoleChange, Term: n.currentTerm, Role: n.role.String()})
 }
 
 // voteRequestTimeout bounds how long startElection waits for a single peer's
@@ -287,6 +294,7 @@ func (n *Node) becomeLeaderLocked(term int64) bool {
 		n.matchIndex[p] = 0
 	}
 
+	n.emitEventLocked(Event{Type: RoleChange, Term: term, Role: n.role.String()})
 	return true
 }
 
