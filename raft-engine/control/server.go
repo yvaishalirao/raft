@@ -13,8 +13,8 @@ import (
 
 // ControlServer exposes a small HTTP JSON API for fault-injection control
 // — kill, restart, partition, unpartition, latency — on its own listener,
-// architecturally separate from the Raft data-path gRPC listener (started
-// in 6.1). It shares no lock with the data plane: every mutation goes
+// architecturally separate from the Raft data-path gRPC listener. It
+// shares no lock with the data plane: every mutation goes
 // through rpc.FaultState's own exported setters (and Node.Restart for
 // /restart), each independently synchronized, so the control channel can
 // never be blocked by data-plane contention.

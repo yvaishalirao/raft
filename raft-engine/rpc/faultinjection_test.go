@@ -38,8 +38,8 @@ func buildFaultInjectedCluster(ids []string, state *FaultState) (nodes []*raft.N
 
 	for i, id := range ids {
 		// Election timeout must stay comfortably larger than the (default
-		// 50ms) heartbeat interval — NFR3 — or a follower's timer can fire
-		// in the gap between heartbeats even under healthy conditions.
+		// 50ms) heartbeat interval, or a follower's timer can fire in the
+		// gap between heartbeats even under healthy conditions.
 		wrapped := NewFaultInjectingTransport(router.Transport(id), state)
 		nodes[i] = raft.NewNode(id, idsExcept(ids, id), wrapped,
 			raft.WithElectionTimeout(150*time.Millisecond, 300*time.Millisecond),
@@ -97,7 +97,7 @@ func TestFaultInjection_NoFaultsEquivalent(t *testing.T) {
 // an equivalent SetDrop on every pair — from the core's point of view a
 // partition is just another shape of message loss. This is a supplementary
 // behavioral check; TestIsolation_NoFaultInjectionReferences (the static
-// grep) is the primary guarantee per INVARIANTS.md.
+// grep) is the primary guarantee.
 func TestFaultInjection_PartitionMatchesDropRate(t *testing.T) {
 	scenarios := []struct {
 		name  string

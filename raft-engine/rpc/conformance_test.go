@@ -46,10 +46,10 @@ func runScenario(t *testing.T, transportFactory func([]string) map[string]raft.T
 	for _, id := range ids {
 		peers := idsExcept(ids, id)
 		// Election timeout must stay comfortably larger than the (default
-		// 50ms) heartbeat interval — NFR3 — or a follower's timer can fire
-		// in the gap between heartbeats even under healthy conditions.
-		// Real gRPC's network overhead makes this margin more important
-		// here than for the in-memory path, not less.
+		// 50ms) heartbeat interval, or a follower's timer can fire in the
+		// gap between heartbeats even under healthy conditions. Real gRPC's
+		// network overhead makes this margin more important here than for
+		// the in-memory path, not less.
 		n := raft.NewNode(id, peers, transports[id],
 			raft.WithElectionTimeout(150*time.Millisecond, 300*time.Millisecond),
 		)
@@ -188,10 +188,9 @@ func makeGRPCFactory(t *testing.T) (factory func([]string) map[string]raft.Trans
 	return factory, listenCount
 }
 
-// TestConformance_InMemoryVsGRPC is the crux of Decision 3: the exact same
-// scripted scenario must produce equivalent outcomes over InMemoryTransport
-// and real gRPC. Any divergence names which transport produced the
-// different result.
+// TestConformance_InMemoryVsGRPC confirms the exact same scripted scenario
+// produces equivalent outcomes over InMemoryTransport and real gRPC. Any
+// divergence names which transport produced the different result.
 func TestConformance_InMemoryVsGRPC(t *testing.T) {
 	resultMem := runScenario(t, inMemoryFactory)
 

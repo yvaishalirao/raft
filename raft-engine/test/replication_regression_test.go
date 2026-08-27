@@ -8,14 +8,12 @@ import (
 	"raft-engine/raft"
 )
 
-// TestReplication_ExtendedFaultMix is a hardening test, not a new
-// invariant: it reuses the fault-mix scenario from
+// TestReplication_ExtendedFaultMix reuses the fault-mix scenario from
 // TestStateMachineSafety_ExtendedRandomizedRun on a fresh NewCluster, then
-// additionally runs the Log Matching pairwise check from 4.1 and confirms
-// commitIndex non-regression from 4.2 — catching bugs that only manifest
-// when multiple fault types interact within one run, rather than in
-// isolated per-invariant tests. Run with -count=20 as a small
-// property-style regression.
+// additionally runs the Log Matching pairwise check and confirms
+// commitIndex non-regression — catching bugs that only manifest when
+// multiple fault types interact within one run. Run with -count=20 as a
+// small property-style regression.
 func TestReplication_ExtendedFaultMix(t *testing.T) {
 	var mu sync.Mutex
 	applied := make(map[string]map[int64][]byte)  // nodeID -> index -> command
@@ -49,16 +47,14 @@ func TestReplication_ExtendedFaultMix(t *testing.T) {
 		}
 	})
 
-	// Check 1: Log Matching pairwise (task 4.1).
 	assertLogMatchingPairwise(t, c.Nodes)
 
-	// Check 2: State machine safety (task 4.4).
 	mu.Lock()
 	assertStateMachineSafety(t, applied)
 	mu.Unlock()
 
-	// Check 3: commitIndex non-regression (task 4.2), within each node
-	// object's own observed lifetime.
+	// commitIndex must never regress within each node object's own
+	// observed lifetime.
 	for n, history := range commitHistory {
 		for i := 1; i < len(history); i++ {
 			if history[i] < history[i-1] {

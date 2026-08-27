@@ -1,0 +1,79 @@
+services:
+  raft-node-0:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raft-node-0
+    environment:
+      - NODE_ID=node-0
+      - PEERS=node-1=raft-node-1:7000,node-2=raft-node-2:7000,node-3=raft-node-3:7000,node-4=raft-node-4:7000
+      - RAFT_PORT=7000
+      - CONTROL_PORT=8000
+    ports:
+      - "8000:8000"
+    networks:
+      - raft-net
+
+  raft-node-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raft-node-1
+    environment:
+      - NODE_ID=node-1
+      - PEERS=node-0=raft-node-0:7000,node-2=raft-node-2:7000,node-3=raft-node-3:7000,node-4=raft-node-4:7000
+      - RAFT_PORT=7000
+      - CONTROL_PORT=8000
+    ports:
+      - "8001:8000"
+    networks:
+      - raft-net
+
+  raft-node-2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raft-node-2
+    environment:
+      - NODE_ID=node-2
+      - PEERS=node-0=raft-node-0:7000,node-1=raft-node-1:7000,node-3=raft-node-3:7000,node-4=raft-node-4:7000
+      - RAFT_PORT=7000
+      - CONTROL_PORT=8000
+    ports:
+      - "8002:8000"
+    networks:
+      - raft-net
+
+  raft-node-3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raft-node-3
+    environment:
+      - NODE_ID=node-3
+      - PEERS=node-0=raft-node-0:7000,node-1=raft-node-1:7000,node-2=raft-node-2:7000,node-4=raft-node-4:7000
+      - RAFT_PORT=7000
+      - CONTROL_PORT=8000
+    ports:
+      - "8003:8000"
+    networks:
+      - raft-net
+
+  raft-node-4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raft-node-4
+    environment:
+      - NODE_ID=node-4
+      - PEERS=node-0=raft-node-0:7000,node-1=raft-node-1:7000,node-2=raft-node-2:7000,node-3=raft-node-3:7000
+      - RAFT_PORT=7000
+      - CONTROL_PORT=8000
+    ports:
+      - "8004:8000"
+    networks:
+      - raft-net
+
+networks:
+  raft-net:
+    driver: bridge

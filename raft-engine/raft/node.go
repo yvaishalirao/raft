@@ -195,10 +195,8 @@ func (n *Node) CommitIndex() int64 {
 // majority returns the number of votes/replicas needed for a majority of
 // the full, fixed, configured cluster size (len(n.peers)+1, including this
 // node) — never a count of peers that happen to be reachable or have
-// responded right now. n.peers is set once at construction and never
-// shrinks, so this is always the same value regardless of live reachability
-// (Invariant I-08: computing majority from reachable-peer count is exactly
-// the bug that lets a minority partition believe it has quorum).
+// responded right now, which would let a minority partition believe it has
+// quorum.
 func (n *Node) majority() int {
 	return (len(n.peers)+1)/2 + 1
 }
@@ -341,9 +339,8 @@ func (n *Node) tryApplyNext(apply func(LogEntry)) bool {
 }
 
 // assertNotBeyondCommitLocked panics if index is beyond commitIndex —
-// defense-in-depth on top of the invariant tryApplyNext's own loop guard
-// already maintains by construction (Invariant I-18: apply-after-commit
-// only). Callers must already hold n.mu.
+// defense-in-depth on top of the guard tryApplyNext's own loop already
+// maintains by construction. Callers must already hold n.mu.
 func (n *Node) assertNotBeyondCommitLocked(index int64) {
 	if index > n.commitIndex {
 		panic(fmt.Sprintf("raft: attempted to apply index %d beyond commitIndex %d", index, n.commitIndex))
@@ -361,7 +358,7 @@ func (n *Node) lastLogIndexLocked() int64 {
 
 // mutateLog is the only sanctioned path for mutating n.log. It panics if a
 // leader attempts any operation other than "append" — leaders must never
-// rewrite or truncate their own log (Invariant I-02).
+// rewrite or truncate their own log.
 func (n *Node) mutateLog(op string, fn func()) {
 	if n.role == Leader && op != "append" {
 		panic("illegal leader log mutation: " + op)

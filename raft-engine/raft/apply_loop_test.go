@@ -94,8 +94,7 @@ func TestApplyLoop_NeverAppliesUncommitted(t *testing.T) {
 // guard directly: tryApplyNext's own loop condition makes it mathematically
 // unreachable via normal operation (lastApplied<commitIndex always implies
 // lastApplied+1<=commitIndex for integers), so this test invokes the guard
-// function itself with a hand-crafted index beyond commitIndex — the
-// "throwaway test double" scenario 8.3 calls for.
+// function itself with a hand-crafted index beyond commitIndex.
 func TestApplyLoop_PanicsOnPrematureApply(t *testing.T) {
 	n := NewNode("node-0", nil, nil)
 	n.mu.Lock()

@@ -40,7 +40,7 @@ func (c *ControlServer) handleKill(w http.ResponseWriter, r *http.Request) {
 
 // handleRestart un-kills the transport AND resets the node's own term/
 // votedFor via Node.Restart — a restart is not just un-killing the
-// transport (see task 7.2).
+// transport.
 func (c *ControlServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if !requirePost(w, r) {
 		return

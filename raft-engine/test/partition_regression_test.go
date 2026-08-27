@@ -11,12 +11,12 @@ import (
 
 const regressionPartitionDuration = 2 * time.Second
 
-// TestPartition_ExtendedRandomizedRun is the property-style hardening pass
-// INVARIANTS.md calls for: run the partition scenario many times (via
-// -count=N) with a randomized minority group and randomized election-timing
-// seed each run, asserting all three properties from 5.2 plus the 5.3
-// heal-convergence property every time — catching a majority-calculation
-// bug subtle enough that a single fixed scenario could pass by luck.
+// TestPartition_ExtendedRandomizedRun is a property-style hardening pass:
+// run the partition scenario many times (via -count=N) with a randomized
+// minority group and randomized election-timing seed each run, asserting
+// the partition-safety and heal-convergence properties every time —
+// catching a majority-calculation bug subtle enough that a single fixed
+// scenario could pass by luck.
 func TestPartition_ExtendedRandomizedRun(t *testing.T) {
 	seed := time.Now().UnixNano()
 	rng := rand.New(rand.NewSource(seed))
@@ -86,7 +86,7 @@ func TestPartition_ExtendedRandomizedRun(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Property (d), from 5.3: heal and confirm convergence.
+	// Heal and confirm convergence.
 	for _, a := range minorityIDs {
 		for _, b := range majorityIDs {
 			c.Router.SetDrop(a, b, false)

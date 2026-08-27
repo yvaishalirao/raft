@@ -10,7 +10,7 @@ import (
 )
 
 // partitionTestDuration must be several times ElectionTimeoutMax so a
-// shallow test can't pass by accident — see the code review note on 5.2.
+// shallow test can't pass by accident.
 const partitionTestDuration = 10 * time.Second
 
 // partitionedCluster builds a 5-node cluster and severs all links —
@@ -255,8 +255,7 @@ func logsSnapshotEqual(a, b map[string][]raft.LogEntry) bool {
 }
 
 // TestPartition_HealConverges confirms that once the partition heals, all 5
-// nodes converge to the majority leader's log — the Log Matching pairwise
-// check from 4.1 holding across the whole cluster, not just within a side.
+// nodes converge to the majority leader's log.
 func TestPartition_HealConverges(t *testing.T) {
 	c, leader, _, stableLogs := runHealScenario(t)
 	defer c.Shutdown()
@@ -272,10 +271,9 @@ func TestPartition_HealConverges(t *testing.T) {
 	}
 }
 
-// TestPartition_HealDiscardsStaleEntries confirms the precise claim from
-// ARCHITECTURE.md's Open Question 5: a minority node's stale, conflicting,
-// uncommitted entry is discarded during reconciliation, not silently merged
-// in as an extra entry alongside the real one.
+// TestPartition_HealDiscardsStaleEntries confirms a minority node's stale,
+// conflicting, uncommitted entry is discarded during reconciliation, not
+// silently merged in as an extra entry alongside the real one.
 func TestPartition_HealDiscardsStaleEntries(t *testing.T) {
 	c, leader, staleNodeID, stableLogs := runHealScenario(t)
 	defer c.Shutdown()

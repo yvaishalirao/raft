@@ -118,9 +118,9 @@ func TestControlPlane_KillEndpoint(t *testing.T) {
 	}
 }
 
-// TestControlPlane_ReachableDuringPartition is the literal Risk-4 test:
-// with the target fully cut off from its Raft peers on the data plane, all
-// 5 control commands must still succeed against it in a single run.
+// TestControlPlane_ReachableDuringPartition confirms that with the target
+// fully cut off from its Raft peers on the data plane, all 5 control
+// commands still succeed against it in a single run.
 func TestControlPlane_ReachableDuringPartition(t *testing.T) {
 	ids := []string{"node-0", "node-1", "node-2", "node-3", "node-4"}
 	router := rpc.NewInMemoryRouter(ids)

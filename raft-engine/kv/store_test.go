@@ -36,10 +36,10 @@ func buildKVCluster(t *testing.T, n int) (stores []*Store, nodes []*raft.Node, c
 
 	for _, id := range ids {
 		// Election timeout must stay comfortably larger than the (default
-		// 50ms) heartbeat interval — NFR3 — or a follower's timer can fire
-		// in the gap between heartbeats even under healthy conditions,
-		// causing spurious re-elections that make "the leader" a moving
-		// target mid-test.
+		// 50ms) heartbeat interval, or a follower's timer can fire in the
+		// gap between heartbeats even under healthy conditions, causing
+		// spurious re-elections that make "the leader" a moving target
+		// mid-test.
 		node := raft.NewNode(id, idsExcept(ids, id), router.Transport(id),
 			raft.WithElectionTimeout(150*time.Millisecond, 300*time.Millisecond),
 		)

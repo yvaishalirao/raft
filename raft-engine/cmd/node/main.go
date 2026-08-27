@@ -33,7 +33,9 @@ func main() {
 	grpcTransport := rpc.NewGRPCTransport(nodeID, peerAddrs)
 	transport := rpc.NewFaultInjectingTransport(grpcTransport, faultState)
 
-	node := raft.NewNode(nodeID, peerIDs, transport)
+	node := raft.NewNode(nodeID, peerIDs, transport, raft.WithOnRoleChange(func(role raft.Role, term int64) {
+		log.Printf("node=%s role=%s term=%d", nodeID, role, term)
+	}))
 	kv.NewStore(node)
 
 	grpcServer, listener, err := rpc.NewGRPCServer(node, ":"+raftPort)
